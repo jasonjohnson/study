@@ -1,0 +1,1 @@
+Scattering by particles with a size comparable to, or larger than, the wavelength of the light is typically treated by the Mie theory, the discrete dipole approximation and other computational techniques.
