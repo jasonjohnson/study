@@ -13,6 +13,108 @@ import (
 	"strings"
 )
 
+const TMPL_INDEX = `
+<html>
+<h1>{{.Title}}</h1>
+<form action="/" method="post">
+<input type="text" name="query"/>
+<input type="submit" value="Query"/>
+</form>
+
+<h2>Response</h2>
+{{if .Response}}
+<p>Commentary: {{.Response.Commentary}}</p>
+
+References:
+<ul>
+{{range .Response.Citations}}
+<li>{{.Claim}} {{range .References}}<a href="/references/{{.File}}">{{.File}}</a>{{end}}</li>
+{{end}}
+</ul>
+
+{{else}}
+<p>Submit a query to get a response.</p>
+{{end}}
+</html>
+`
+
+const TMPL_PROMPT_EXPAND_QUERY = `
+INSTRUCTIONS
+
+Expand the following QUERY. Provide 10 additional queries you would use to
+diversify your knowledge on the topic.
+
+QUERY
+
+{{.Query}}
+
+JSON RESPONSE TEMPLATE
+
+{
+	"queries": ["<query 1>", "<query 2>", "<query 3>"]
+}
+`
+
+const TMPL_PROMPT_RESPONSE = `
+INSTRUCTIONS
+
+Respond to the following QUERY using REFERENCES below. Cite the a file in the
+REFERENCES that contains the fact used. Provide uncited commentary separately.
+If NO REFERENCES are provided, it is impossible to provide citations.
+
+QUERY
+
+{{.Query}}
+
+REFERENCES
+
+{{range .References}}
+- File: {{.File}}
+- Exerpt: {{.Exerpt}}
+{{end}}
+
+JSON RESPONSE TEMPLATE
+
+{
+	"commentary": "<summary commentary without citations>",
+	"citations": [
+		{
+			"claim": "<summary claim 1>",
+			"references": [
+				{"exerpt": "<exerpt>", "file": "<file-name-1.txt>"},
+				{"exerpt": "<exerpt>", "file": "<file-name-2.txt>"},
+				{"exerpt": "<exerpt>", "file": "<file-name-3.txt>"},
+			]
+		},
+	]
+}
+`
+
+var (
+	openAIAPIKeyEnv string = "OPENAI_API_KEY"
+	openAIAPIKey    string
+
+	openAILanguageModelEnv     string = "OPENAI_LANGUAGE_MODEL"
+	openAILanguageModelDefault string = "gpt-4o"
+	openAILanguageModel        string
+
+	openAIEmbeddingModelEnv     string = "OPENAI_EMBEDDING_MODEL"
+	openAIEmbeddingModelDefault string = "text-embedding-3-large"
+	openAIEmbeddingModel        string
+
+	openAICompletionURL          string = "https://api.openai.com/v1/chat/completions"
+	openAICompletionSystemPrompt string = "You are a helpful assistant."
+
+	openAIEmbeddingURL string = "https://api.openai.com/v1/embeddings"
+
+	similarityThreshold float64 = 0.5
+
+	references     []Reference
+	referencesPath string = "references"
+
+	templates map[string]*template.Template = make(map[string]*template.Template)
+)
+
 type Reference struct {
 	File      string    `json:"file"`
 	Exerpt    string    `json:"exerpt"`
@@ -94,106 +196,6 @@ func NewEmbeddingResponse() *EmbeddingResponse {
 	return &EmbeddingResponse{}
 }
 
-var (
-	openAIAPIKeyEnv string = "OPENAI_API_KEY"
-	openAIAPIKey    string
-
-	openAILanguageModelEnv     string = "OPENAI_LANGUAGE_MODEL"
-	openAILanguageModelDefault string = "gpt-4o"
-	openAILanguageModel        string
-
-	openAIEmbeddingModelEnv     string = "OPENAI_EMBEDDING_MODEL"
-	openAIEmbeddingModelDefault string = "text-embedding-3-large"
-	openAIEmbeddingModel        string
-
-	openAICompletionURL          string = "https://api.openai.com/v1/chat/completions"
-	openAICompletionSystemPrompt string = "You are a helpful assistant."
-
-	openAIEmbeddingURL string = "https://api.openai.com/v1/embeddings"
-
-	similarityThreshold float64 = 0.5
-
-	references     []Reference
-	referencesPath string = "references"
-)
-
-const TMPL_INDEX = `
-<html>
-<h1>{{.Title}}</h1>
-<form action="/" method="post">
-<input type="text" name="query"/>
-<input type="submit" value="Query"/>
-</form>
-
-<h2>Response</h2>
-{{if .Response}}
-<p>Commentary: {{.Response.Commentary}}</p>
-
-References:
-<ul>
-{{range .Response.Citations}}
-<li>{{.Claim}} {{range .References}}<a href="/references/{{.File}}">{{.File}}</a>{{end}}</li>
-{{end}}
-</ul>
-
-{{else}}
-<p>Submit a query to get a response.</p>
-{{end}}
-</html>
-`
-
-const TMPL_QUERY_EXPANSION = `
-INSTRUCTIONS
-
-Expand the following QUERY. Provide 10 additional queries you would use to
-diversify your knowledge on the topic.
-
-QUERY
-
-{{.Query}}
-
-JSON RESPONSE TEMPLATE
-
-{
-	"queries": ["<query 1>", "<query 2>", "<query 3>"]
-}
-`
-
-const TMPL_CITED = `
-INSTRUCTIONS
-
-Respond to the following QUERY using REFERENCES below. Cite the a file in the
-REFERENCES that contains the fact used. Provide uncited commentary separately.
-If NO REFERENCES are provided, it is impossible to provide citations.
-
-QUERY
-
-{{.Query}}
-
-REFERENCES
-
-{{range .References}}
-- File: {{.File}}
-- Exerpt: {{.Exerpt}}
-{{end}}
-
-JSON RESPONSE TEMPLATE
-
-{
-	"commentary": "<summary commentary without citations>",
-	"citations": [
-		{
-			"claim": "<summary claim 1>",
-			"references": [
-				{"exerpt": "<exerpt>", "file": "<file-name-1.txt>"},
-				{"exerpt": "<exerpt>", "file": "<file-name-2.txt>"},
-				{"exerpt": "<exerpt>", "file": "<file-name-3.txt>"},
-			]
-		},
-	]
-}
-`
-
 func mustGetEnv(key string) string {
 	if value, exists := os.LookupEnv(key); exists {
 		return value
@@ -259,6 +261,30 @@ func doPost(url string, body []byte) []byte {
 	}
 
 	return responseBodyBytes
+}
+
+func LoadTemplate(name string, text string) *template.Template {
+	if tmpl, ok := templates[name]; ok {
+		return tmpl
+	}
+
+	tmpl, err := template.New(name).Parse(text)
+	if err != nil {
+		log.Fatalf("failed to parse prompt template: %v", err)
+	}
+
+	templates[name] = tmpl
+
+	return tmpl
+}
+
+func RenderTemplate(name string, data map[string]interface{}) []byte {
+	writer := &strings.Builder{}
+	err := templates[name].Execute(writer, data)
+	if err != nil {
+		log.Fatalf("failed to execute template: %v", err)
+	}
+	return []byte(writer.String())
 }
 
 func CalculateSimilarity(a, b []float64) float64 {
@@ -351,68 +377,32 @@ func GenerateEmbedding(text string) []float64 {
 }
 
 func ExpandQuery(query string) QueryExpansionResponse {
-	// TODO(tmpl) deduplicate this code
-	tmpl, err := template.New("prompt").Parse(TMPL_QUERY_EXPANSION)
-	if err != nil {
-		log.Fatalf("failed to parse prompt template: %v", err)
-	}
+	response := GenerateCompletion(string(RenderTemplate("expand", map[string]interface{}{
+		"Query": query,
+	})))
 
-	// TODO(tmpl) deduplicate this code
-	var output string
-	writer := &strings.Builder{}
-	err = tmpl.Execute(writer, map[string]string{"Query": query})
-	if err != nil {
-		log.Fatalf("failed to execute template: %v", err)
-	}
-	output = writer.String()
+	expandedQueryResponse := QueryExpansionResponse{}
 
-	response := GenerateCompletion(output)
+	fromJSON([]byte(response), &expandedQueryResponse)
 
-	var expandedQuery QueryExpansionResponse
-	err = json.Unmarshal([]byte(response), &expandedQuery)
-	if err != nil {
-		log.Fatalf("failed to unmarshal response")
-	}
-
-	return expandedQuery
+	return expandedQueryResponse
 }
 
 func GenerateCompletionWithCitations(query string, references []Reference) CitedResponse {
-	// TODO(tmpl) deduplicate this code
-	tmpl, err := template.New("prompt").Parse(TMPL_CITED)
-	if err != nil {
-		log.Fatalf("failed to parse prompt template: %v", err)
-	}
+	response := GenerateCompletion(string(RenderTemplate("response", map[string]interface{}{
+		"Query":      query,
+		"References": references,
+	})))
 
-	// TODO(tmpl) deduplicate this code
-	var output string
-	writer := &strings.Builder{}
-	err = tmpl.Execute(writer, map[string]interface{}{"Query": query, "References": references})
-	if err != nil {
-		log.Fatalf("failed to execute template: %v", err)
-	}
-	output = writer.String()
+	citedResponse := CitedResponse{}
 
-	response := GenerateCompletion(output)
-
-	var citedResponse CitedResponse
-	err = json.Unmarshal([]byte(response), &citedResponse)
-	if err != nil {
-		log.Fatalf("failed to unmarshal response")
-	}
+	fromJSON([]byte(response), &citedResponse)
 
 	return citedResponse
 }
 
 func Handler(w http.ResponseWriter, r *http.Request) {
 	title := "Study"
-
-	// TODO(tmpl) deduplicate this code
-	template, err := template.New("index").Parse(TMPL_INDEX)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
 
 	switch r.Method {
 	case http.MethodPost:
@@ -423,17 +413,15 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 			references = append(references, FindReference(query)...)
 		}
 
-		// TODO(tmpl) deduplicate this code
-		template.Execute(w, map[string]interface{}{
+		w.Write(RenderTemplate("index", map[string]interface{}{
 			"Title":    title,
 			"Response": GenerateCompletionWithCitations(query, references),
-		})
+		}))
 	case http.MethodGet:
-		// TODO(tmpl) deduplicate this code
-		template.Execute(w, map[string]interface{}{
+		w.Write(RenderTemplate("index", map[string]interface{}{
 			"Title":    title,
 			"Response": nil,
-		})
+		}))
 	default:
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 	}
@@ -447,9 +435,13 @@ func main() {
 	openAILanguageModel = getEnv(openAILanguageModelEnv, openAILanguageModelDefault)
 	openAIEmbeddingModel = getEnv(openAIEmbeddingModelEnv, openAIEmbeddingModelDefault)
 
+	LoadTemplate("index", TMPL_INDEX)
+	LoadTemplate("expand", TMPL_PROMPT_EXPAND_QUERY)
+	LoadTemplate("response", TMPL_PROMPT_RESPONSE)
+
 	LoadReferences(referencesPath)
 
 	http.HandleFunc("/", Handler)
 	http.Handle("/references/", http.StripPrefix("/references/", http.FileServer(http.Dir("references"))))
-	http.ListenAndServe(":8080", nil)
+	http.ListenAndServe("127.0.0.1:8080", nil)
 }
